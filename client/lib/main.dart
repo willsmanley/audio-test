@@ -1,16 +1,11 @@
 import 'package:flutter/material.dart';
-import 'dart:typed_data';
 import 'package:web_socket_channel/web_socket_channel.dart';
 import 'package:http/http.dart' as http;
-import 'package:flutter_sound/flutter_sound.dart';
 import 'dart:async';
-import 'package:permission_handler/permission_handler.dart';
+import 'package:just_audio/just_audio.dart';
+import 'package:audio_session/audio_session.dart';
 
-//------------------------------------------------------
-//------------------------------------------------------
-var apiToken = 'ADD API TOKEN HERE!!!';
-//------------------------------------------------------
-//------------------------------------------------------
+var apiToken = 'PASTE API TOKEN HERE';
 
 void main() {
   runApp(const App());
@@ -35,7 +30,6 @@ class AppState extends State<App> {
   
 }
 
-// TODO: consider how other audio interrupts will be handled via https://pub.dev/packages/audio_session
 class AudioTest extends StatefulWidget {
   const AudioTest({super.key});
   @override
@@ -43,125 +37,74 @@ class AudioTest extends StatefulWidget {
 }
 
 class AudioTestState extends State<AudioTest> {
+  late AudioPlayer _audioPlayer;
   late WebSocketChannel _channel;
-  final FlutterSoundRecorder _recorder =
-      FlutterSoundRecorder();
-  final FlutterSoundPlayer _player = FlutterSoundPlayer();
-  late StreamController<Food> _audioStreamController;
-  bool _isRecording = false;
-  bool _recorderInitialized = false;
-  bool _playerInitialized = false;
+    late StreamController<List<int>> _audioBuffer;
 
   @override
   void initState() {
     super.initState();
+    _audioBuffer = StreamController<List<int>>();
     _registerCall();
-    _audioStreamController = StreamController<Food>();
+    _registerPlayer();
   }
 
-  Future<void> _initializeAudio() async {
-    print('initializing player');
-    await _player.openPlayer();
-    setState(() {
-      _playerInitialized = true;
-    });
-    print('player initialized');
-
-    print('requesting microphone permission');
-    var status = await Permission.microphone.request();
-    print('status');
-    print(status);
-    if (status != PermissionStatus.granted) {
-      print('permission not granted');
-      throw RecordingPermissionException('Microphone permission not granted');
-    }
-    print('permission granted');
-    await _recorder.openRecorder();
-    print('recorder opened');
-    _recorderInitialized = true;
+  Future<void> _registerPlayer() async {
+    _audioPlayer = AudioPlayer();
+    final session = await AudioSession.instance;
+    await session.configure(const AudioSessionConfiguration.speech());
   }
 
   Future<void> _registerCall() async {
     final response = await http.get(
-      Uri.parse('https://powerful-hamlet-06075-3a5b6fc81641.herokuapp.com/call-id'),
+      Uri.parse('https://safe-gorge-65703-197182a5b4e2.herokuapp.com/call-id'),
       headers: {
         'X-API-TOKEN': apiToken,
         'Content-Type': 'application/json',
       },
     );
-    print('call id: ${response.body}');
-    _initializeWebsocketChannel(response.body);
+    var callId = response.body.replaceAll(RegExp(r'^"|"$'), '');
+    print('call id: $callId');
+    _initializeWebsocketChannel(callId);
   }
 
   void _initializeWebsocketChannel(String callId) {
-    print('initializing websocket channel');
     _channel = WebSocketChannel.connect(
         Uri.parse('wss://api.retellai.com/audio-websocket/$callId'));
-    print('channel initialized');
-    _channel.stream.listen((data) async {
-      print('listening');
+    print('websocket channel initialized');
+
+    _channel.stream.listen((data) {
       if (data is List<int>) {
-        print('has data');
-        _playRawAudio(Uint8List.fromList(data));
-      } else if (data == 'clear') {
-        print('clearing');
-        _player.stopPlayer();
+        print('Received audio data: $data');
+        _audioBuffer.add(data);
+        if (!_audioPlayer.playing) {
+          _playStream();
+        }
       }
     });
-    _initializeAudio();
   }
 
-  Future<void> _startRecording() async {
-    print('starting recording');
-    print(_isRecording);
-    print(_recorderInitialized);
-    if (_isRecording || !_recorderInitialized) return;
-    print('continuing');
-    // Ensure the player is stopped
-    if (_player.isPlaying) {
-      print('stopping player');
-      await _player.stopPlayer();
+  Future<void> _playStream() async {
+    try {
+      final source = ByteStreamAudioSource(_audioBuffer.stream);
+      print('Setting audio source...');
+      await _audioPlayer.setAudioSource(source);
+      print('Audio source set');
+
+      print('Starting playback...');
+      await _audioPlayer.play();
+      print('Playback started');
+    } catch (e) {
+      print('Error in playing stream: $e');
     }
-
-    setState(() {
-      _isRecording = true;
-    });
-
-    print('really starting recording');
-    await _recorder.startRecorder(
-      toStream: _audioStreamController.sink,
-      codec: Codec.pcm16,
-      sampleRate: 24000,
-      numChannels: 1,
-    );
-    print('recorder started');
-    // Listen to the stream and send bytes to the WebSocket
-    _audioStreamController.stream.listen((food) {
-      print('food');
-      if (food is FoodData) {
-        print('is food');
-        _channel.sink.add(food.data);
-      }
-    });
   }
 
-  Future<void> _stopRecording() async {
-    if (!_isRecording) return;
-    await _recorder.stopRecorder();
-    setState(() {
-      _isRecording = false;
-    });
-    await _audioStreamController.close();
-  }
-
-  Future<void> _playRawAudio(Uint8List audioBytes) async {
-    if (!_playerInitialized) return;
-    await _player.startPlayer(
-      fromDataBuffer: audioBytes,
-      codec: Codec.pcm16,
-      sampleRate: 24000,
-      numChannels: 1,
-    );
+  @override
+  void dispose() {
+    _channel.sink.close();
+    _audioPlayer.dispose();
+    _audioBuffer.close();
+    super.dispose();
   }
 
   @override
@@ -170,30 +113,30 @@ class AudioTestState extends State<AudioTest> {
       appBar: AppBar(
         title: const Text('Audio Test'),
       ),
-      body: Center(
+      body: const Center(
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            ElevatedButton(
-              onPressed: _isRecording ? _stopRecording : _startRecording,
-              child: Text(_isRecording ? 'Stop Recording' : 'Start Recording'),
-            ),
-          ],
+          children: [],
         ),
       ),
     );
   }
+}
+
+class ByteStreamAudioSource extends StreamAudioSource {
+  final Stream<List<int>> _byteStream;
+
+  ByteStreamAudioSource(this._byteStream);
 
   @override
-  void dispose() {
-    _channel.sink.close();
-    if (_recorderInitialized) {
-      _recorder.closeRecorder();
-    }
-    if (_playerInitialized) {
-      _player.closePlayer();
-    }
-    _audioStreamController.close();
-    super.dispose();
+  Future<StreamAudioResponse> request([int? start, int? end]) async {
+    print('Requesting audio stream...');
+    return StreamAudioResponse(
+      sourceLength: null,
+      offset: 0,
+      contentLength: null,
+      contentType: 'audio/pcm',
+      stream: _byteStream,
+    );
   }
 }
